@@ -347,14 +347,14 @@
                     </div>
                 </div>
 
-                    <!-- 独立卡片：字号与间距 -->
+                    <!-- 独立卡片：字号、字间距与行间距 -->
                     <div class="nytw-display-setting-card" id="nytw_typography_card">
                         <div class="nytw-card-header nytw-card-toggle">
                             <div class="nytw-card-icon">
                                 <i class="fa-solid fa-text-height"></i>
                             </div>
                             <div class="nytw-card-info">
-                                <div class="nytw-card-title">字号 / 字间距</div>
+                                <div class="nytw-card-title">字号 / 字间距 / 行间距</div>
                             </div>
                             <div class="nytw-card-chevron">
                                 <i class="fa-solid fa-chevron-down"></i>
@@ -364,6 +364,16 @@
                         <div class="nytw-card-content">
                             <div class="nytw-card-body-padding">
                                 <div class="nytw-card-section-body">
+                                    <div class="nytw-typo-row nytw-typo-row--line-height" id="nytw_typo_row_line_height">
+                                        <div class="nytw-typo-type">
+                                            <i class="fa-solid fa-text-height"></i> 行间距
+                                        </div>
+                                        <div class="nytw-stepper nytw-stepper--line-height">
+                                            <button type="button" class="nytw-stepper-btn minus" tabindex="-1"><i class="fa-solid fa-minus"></i></button>
+                                            <input id="nytw_line_height" type="number" class="text_pole nytw-typo-input" placeholder="默认" min="0.8" max="3" step="0.05" />
+                                            <button type="button" class="nytw-stepper-btn plus" tabindex="-1"><i class="fa-solid fa-plus"></i></button>
+                                        </div>
+                                    </div>
                                     <div class="nytw-typo-row nytw-typo-head" aria-hidden="true">
                                         <div></div>
                                         <div><i class="fa-solid fa-ruler-vertical"></i> 字号 (px)</div>

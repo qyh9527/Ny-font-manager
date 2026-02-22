@@ -1,9 +1,10 @@
-﻿﻿﻿﻿﻿﻿﻿﻿import { eventSource, event_types, streamingProcessor } from '../../../../script.js';
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { eventSource, event_types, streamingProcessor } from '../../../../script.js';
 import { applyCustomIndependentFont, CUSTOM_INDEPENDENT_FONT_CLASS, CUSTOM_INDEPENDENT_FONT_MARK_ATTR } from './customIndependentFont.js';
 import { morphdom } from '../../../../lib.js';
 import {
     clampOptionalFontSize,
     clampOptionalLetterSpacing,
+    clampOptionalLineHeight,
     clampStreamAnimSpeed,
     getStreamRenderMode,
     normalizeStreamAnimEffect,
@@ -113,6 +114,7 @@ function clearTypographyVariables(chatEl) {
     chatEl.style.removeProperty('--nytw-custom-letter-spacing');
     chatEl.style.removeProperty('--nytw-locale-font-size');
     chatEl.style.removeProperty('--nytw-locale-letter-spacing');
+    chatEl.style.removeProperty('--nytw-line-height');
 }
 
 function applyTypographyVariables() {
@@ -132,6 +134,7 @@ function applyTypographyVariables() {
     const customLetterSpacing = clampOptionalLetterSpacing(settings.customLetterSpacing);
     const localeFontSize = clampOptionalFontSize(settings.localeFontSize);
     const localeLetterSpacing = clampOptionalLetterSpacing(settings.localeLetterSpacing);
+    const lineHeight = clampOptionalLineHeight(settings.lineHeight);
 
     setOrRemoveCssVar(chatEl, '--nytw-body-font-size', bodyFontSize === null ? '' : `${bodyFontSize}px`);
     setOrRemoveCssVar(chatEl, '--nytw-body-letter-spacing', bodyLetterSpacing === null ? '' : `${bodyLetterSpacing}em`);
@@ -141,6 +144,7 @@ function applyTypographyVariables() {
     setOrRemoveCssVar(chatEl, '--nytw-custom-letter-spacing', customLetterSpacing === null ? '' : `${customLetterSpacing}em`);
     setOrRemoveCssVar(chatEl, '--nytw-locale-font-size', localeFontSize === null ? '' : `${localeFontSize}px`);
     setOrRemoveCssVar(chatEl, '--nytw-locale-letter-spacing', localeLetterSpacing === null ? '' : `${localeLetterSpacing}em`);
+    setOrRemoveCssVar(chatEl, '--nytw-line-height', lineHeight === null ? '' : String(lineHeight));
 }
 
 async function applyFontSettings() {
@@ -222,8 +226,8 @@ async function applyFontSettings() {
         ].join('');
     }
 
-    css += '\n/* Typography overrides (font-size / letter-spacing) */\n';
-    css += '\n#chat .mes_text{font-size:var(--nytw-body-font-size) !important;letter-spacing:var(--nytw-body-letter-spacing) !important;}';
+    css += '\n/* Typography overrides (font-size / letter-spacing / line-height) */\n';
+    css += '\n#chat .mes_text{font-size:var(--nytw-body-font-size) !important;letter-spacing:var(--nytw-body-letter-spacing) !important;line-height:var(--nytw-line-height) !important;}';
     css += `\n#chat .mes_text [${LOCALE_FONT_ATTR}]{font-size:var(--nytw-locale-font-size) !important;letter-spacing:var(--nytw-locale-letter-spacing) !important;}`;
     css += [
         '\n#chat .mes_text .Ny-font-manager,',

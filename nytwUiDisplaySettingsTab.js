@@ -4,6 +4,7 @@ import { debounce } from './nytwUtils.js';
 import {
     clampOptionalFontSize,
     clampOptionalLetterSpacing,
+    clampOptionalLineHeight,
     clampStreamAnimSpeed,
     normalizeStreamAnimEffect,
     normalizeStreamCursorAnim,
@@ -70,6 +71,7 @@ export function initDisplaySettingsTab() {
     const customLetterSpacingEl = document.getElementById('nytw_custom_letter_spacing');
     const localeFontSizeEl = document.getElementById('nytw_locale_font_size');
     const localeLetterSpacingEl = document.getElementById('nytw_locale_letter_spacing');
+    const lineHeightEl = document.getElementById('nytw_line_height');
 
     const syncTypographyVisibility = () => {
         const customEnabled = customWrapEnabledEl instanceof HTMLInputElement
@@ -116,12 +118,30 @@ export function initDisplaySettingsTab() {
         return Number.isFinite(num) ? num : null;
     };
 
+    const toLineHeight = (lineHeightValue, fontSizePx) => {
+        const raw = String(lineHeightValue || '').trim();
+        if (!raw || raw === 'normal') return null;
+        if (/px$/i.test(raw)) {
+            const px = pxToNumber(raw);
+            if (px === null) return null;
+            if (!Number.isFinite(fontSizePx) || fontSizePx <= 0) return null;
+            return px / fontSizePx;
+        }
+        if (/em$/i.test(raw)) {
+            const em = Number.parseFloat(raw);
+            return Number.isFinite(em) ? em : null;
+        }
+        const num = Number.parseFloat(raw);
+        return Number.isFinite(num) ? num : null;
+    };
+
     const readTypographyFromEl = (el) => {
-        if (!(el instanceof HTMLElement)) return { fontSizePx: null, letterSpacingEm: null };
+        if (!(el instanceof HTMLElement)) return { fontSizePx: null, letterSpacingEm: null, lineHeight: null };
         const style = getComputedStyle(el);
         const fontSizePx = pxToNumber(style.fontSize);
         const letterSpacingEm = toLetterSpacingEm(style.letterSpacing, fontSizePx);
-        return { fontSizePx, letterSpacingEm };
+        const lineHeight = toLineHeight(style.lineHeight, fontSizePx);
+        return { fontSizePx, letterSpacingEm, lineHeight };
     };
 
     const setPlaceholder = (inputEl, text, fallback = '默认') => {
@@ -155,6 +175,7 @@ export function initDisplaySettingsTab() {
 
         setPlaceholder(bodyFontSizeEl, body.fontSizePx === null ? '' : formatNumber(body.fontSizePx, 2));
         setPlaceholder(bodyLetterSpacingEl, body.letterSpacingEm === null ? '' : formatNumber(body.letterSpacingEm, 2));
+        setPlaceholder(lineHeightEl, body.lineHeight === null ? '' : formatNumber(body.lineHeight, 2));
         setPlaceholder(dialogueFontSizeEl, dialogue.fontSizePx === null ? '' : formatNumber(dialogue.fontSizePx, 2));
         setPlaceholder(dialogueLetterSpacingEl, dialogue.letterSpacingEm === null ? '' : formatNumber(dialogue.letterSpacingEm, 2));
         setPlaceholder(customFontSizeEl, custom.fontSizePx === null ? '' : formatNumber(custom.fontSizePx, 2));
@@ -491,6 +512,12 @@ export function initDisplaySettingsTab() {
 
     // Typography controls
     bindOptionalNumberInput(
+        lineHeightEl,
+        () => settings.lineHeight,
+        (v) => { settings.lineHeight = v; },
+        clampOptionalLineHeight,
+    );
+    bindOptionalNumberInput(
         bodyFontSizeEl,
         () => settings.bodyFontSize,
         (v) => { settings.bodyFontSize = v; },
@@ -569,7 +596,8 @@ export function initDisplaySettingsTab() {
             if (isNaN(currentVal)) {
                 currentVal = Number.parseFloat(input.placeholder);
                 if (isNaN(currentVal)) {
-                    if (input.id.includes('spacing')) currentVal = 0;
+                    if (/line[_-]height/i.test(input.id)) currentVal = 1.6;
+                    else if (input.id.includes('spacing')) currentVal = 0;
                     else currentVal = 16;
                 }
             }

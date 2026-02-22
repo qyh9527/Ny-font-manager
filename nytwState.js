@@ -46,6 +46,7 @@ export const DEFAULT_SETTINGS = {
     customLetterSpacing: null,
     localeFontSize: null,
     localeLetterSpacing: null,
+    lineHeight: null,
     streamRenderMode: 'defer',
     streamAnimEffect: 'none',
     streamAnimSpeed: 20,
@@ -123,6 +124,13 @@ export function clampOptionalLetterSpacing(value) {
     return Math.round(clamped * 100) / 100; // 0.01em steps
 }
 
+export function clampOptionalLineHeight(value) {
+    const num = parseOptionalNumber(value);
+    if (num === null) return null;
+    const clamped = Math.min(3, Math.max(0.8, num));
+    return Math.round(clamped * 100) / 100; // 0.01 steps
+}
+
 export function getStreamRenderMode() {
     return normalizeStreamRenderMode(settings.streamRenderMode);
 }
@@ -152,6 +160,7 @@ function applyDefaultSettings() {
     settings.customLetterSpacing = clampOptionalLetterSpacing(settings.customLetterSpacing);
     settings.localeFontSize = clampOptionalFontSize(settings.localeFontSize);
     settings.localeLetterSpacing = clampOptionalLetterSpacing(settings.localeLetterSpacing);
+    settings.lineHeight = clampOptionalLineHeight(settings.lineHeight);
 
     if (!hadCustomFontWrapEnabled) {
         const hasCustomFont = Boolean(String(settings.customFont || '').trim());
