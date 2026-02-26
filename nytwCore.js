@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { eventSource, event_types, streamingProcessor } from '../../../../script.js';
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { eventSource, event_types, streamingProcessor } from '../../../../script.js';
 import { applyCustomIndependentFont, CUSTOM_INDEPENDENT_FONT_CLASS, CUSTOM_INDEPENDENT_FONT_MARK_ATTR } from './customIndependentFont.js';
 import { morphdom } from '../../../../lib.js';
 import {
@@ -21,9 +21,14 @@ import {
     ensureFontStyleElement,
     parseFontFamilyList,
     revokeAllFontObjectUrls,
+    ensureExternalFontStylesheetsReady,
+    ensureFontFamilyUsable,
+    guessUsableFamilyByAlias,
+    getFontIssueReasonForFamily,
     syncExternalFontStylesheets,
     toCssFontFamilyValue,
 } from './nytwFonts.js';
+import { notify } from './nytwUtils.js';
 
 const TYPEWRITER_SELECTOR = '.custom-Ny-font-manager, .Ny-font-manager';
 const PROCESSED_ATTR = 'data-ny-tw-processed';
@@ -147,21 +152,124 @@ function applyTypographyVariables() {
     setOrRemoveCssVar(chatEl, '--nytw-line-height', lineHeight === null ? '' : String(lineHeight));
 }
 
+const fontValidationNoticeSigByField = new Map();
+const fontAutoMatchNoticeSigByField = new Map();
+const invalidConfiguredFontFamilies = new Set();
+
+function notifyFontUnavailable(fieldLabel, family, reason) {
+    const label = String(fieldLabel || '字体设置');
+    const resolvedFamily = String(family || '').trim() || '（未命名）';
+    const resolvedReason = String(reason || '').trim() || '未知原因';
+    const sig = `${resolvedFamily}::${resolvedReason}`;
+    if (fontValidationNoticeSigByField.get(label) === sig) return;
+    fontValidationNoticeSigByField.set(label, sig);
+    notify('error', `[${label}] 字体“${resolvedFamily}”不可用：${resolvedReason}`);
+}
+
+function notifyFontAutoMatched(fieldLabel, fromFamily, toFamily) {
+    const label = String(fieldLabel || '字体设置');
+    const from = String(fromFamily || '').trim() || '（未命名）';
+    const to = String(toFamily || '').trim() || '（未命名）';
+    const sig = `${from}->${to}`;
+    if (fontAutoMatchNoticeSigByField.get(label) === sig) return;
+    fontAutoMatchNoticeSigByField.set(label, sig);
+    notify('warning', `[${label}] 字体“${from}”不可用，已自动匹配为“${to}”。`);
+}
+
+function clearFontUnavailableNotice(fieldLabel) {
+    const label = String(fieldLabel || '字体设置');
+    fontValidationNoticeSigByField.delete(label);
+    fontAutoMatchNoticeSigByField.delete(label);
+}
+
+async function resolveValidatedFontCss(rawValue, fieldLabel) {
+    const families = parseFontFamilyList(rawValue);
+    if (!families.length) {
+        clearFontUnavailableNotice(fieldLabel);
+        return { css: '', families: [] };
+    }
+
+    const primary = families[0];
+    const availability = await ensureFontFamilyUsable(primary);
+    if (!availability.ok) {
+        const guessed = await guessUsableFamilyByAlias(primary);
+        if (guessed?.ok && guessed.family) {
+            const replacedFamilies = [guessed.family, ...families.slice(1)];
+            invalidConfiguredFontFamilies.delete(primary);
+            invalidConfiguredFontFamilies.delete(guessed.family);
+            clearFontUnavailableNotice(fieldLabel);
+            notifyFontAutoMatched(fieldLabel, primary, guessed.family);
+            return {
+                css: toCssFontFamilyValue(replacedFamilies.join(', ')),
+                families: replacedFamilies.filter((family) => !invalidConfiguredFontFamilies.has(family)),
+            };
+        }
+
+        invalidConfiguredFontFamilies.add(primary);
+        const importedReason = getFontIssueReasonForFamily(primary);
+        const guessedReason = guessed?.reason || '';
+        const reason = importedReason || availability.reason || guessedReason || '未知错误';
+        notifyFontUnavailable(fieldLabel, primary, reason);
+        return { css: '', families: [] };
+    }
+
+    invalidConfiguredFontFamilies.delete(primary);
+
+    clearFontUnavailableNotice(fieldLabel);
+    return {
+        css: toCssFontFamilyValue(rawValue),
+        families: families.filter((family) => !invalidConfiguredFontFamilies.has(family)),
+    };
+}
+
+async function buildValidatedLocaleFontMap() {
+    const map = new Map();
+    if (!settings.fontsEnabled) return map;
+    if (!settings.localeFontEnabled) return map;
+    if (!Array.isArray(settings.localeFonts)) return map;
+
+    for (const rule of settings.localeFonts) {
+        const key = String(rule?.rangeKey || '').trim();
+        if (!key || !UNICODE_RANGES[key]) continue;
+
+        const rawFontValue = String(rule?.font || '').trim();
+        if (!rawFontValue) continue;
+
+        const label = `多语言字体（${UNICODE_RANGES[key]?.label || key}）`;
+        const resolved = await resolveValidatedFontCss(rawFontValue, label);
+        if (!resolved.css) continue;
+
+        map.set(key, resolved.css);
+    }
+
+    return map;
+}
+
 async function applyFontSettings() {
     const styleEl = ensureFontStyleElement();
     if (!settings.fontsEnabled) {
         styleEl.textContent = '';
         revokeAllFontObjectUrls();
         syncExternalFontStylesheets([]);
+        fontValidationNoticeSigByField.clear();
+        fontAutoMatchNoticeSigByField.clear();
+        invalidConfiguredFontFamilies.clear();
         applyTypographyVariables();
         return;
     }
 
-    const globalFontCss = toCssFontFamilyValue(settings.globalFont);
-    const bodyFontCss = toCssFontFamilyValue(settings.bodyFont);
-    const dialogueFontCss = toCssFontFamilyValue(settings.dialogueFont);
-    const customFontCss = toCssFontFamilyValue(settings.customFont);
-    const localeFontMap = getActiveLocaleFontMap();
+    invalidConfiguredFontFamilies.clear();
+
+    const resolvedGlobal = await resolveValidatedFontCss(settings.globalFont, '全局字体');
+    const resolvedBody = await resolveValidatedFontCss(settings.bodyFont, '正文字体');
+    const resolvedDialogue = await resolveValidatedFontCss(settings.dialogueFont, '对话字体');
+    const resolvedCustom = await resolveValidatedFontCss(settings.customFont, '自定义包裹字体');
+    const localeFontMap = await buildValidatedLocaleFontMap();
+
+    const globalFontCss = resolvedGlobal.css;
+    const bodyFontCss = resolvedBody.css;
+    const dialogueFontCss = resolvedDialogue.css;
+    const customFontCss = resolvedCustom.css;
 
     // Collect all families including locale overrides
     const localeFontNames = [];
@@ -170,20 +278,26 @@ async function applyFontSettings() {
     }
 
     const families = [
-        ...parseFontFamilyList(globalFontCss),
-        ...parseFontFamilyList(bodyFontCss),
-        ...parseFontFamilyList(dialogueFontCss),
-        ...parseFontFamilyList(customFontCss),
+        ...resolvedGlobal.families,
+        ...resolvedBody.families,
+        ...resolvedDialogue.families,
+        ...resolvedCustom.families,
         ...localeFontNames,
     ];
 
-    syncExternalFontStylesheets(collectExternalFontCssUrlsForFamilies(families));
+    const externalCssUrls = collectExternalFontCssUrlsForFamilies(families);
+    syncExternalFontStylesheets(externalCssUrls);
+    try {
+        await ensureExternalFontStylesheetsReady(externalCssUrls);
+    } catch (error) {
+        console.warn('[NyTW] Failed while waiting external font stylesheets', error);
+    }
 
     let css = '/* NyTW Fonts (generated) */\n';
     try {
         css += await buildFontFaceCssForFamilies(families);
     } catch (error) {
-        console.error('[NyTW] Failed to build @font-face rules', error);
+        console.error('[NyTW] Failed to prepare imported file fonts', error);
     }
 
     if (globalFontCss) {
@@ -505,6 +619,10 @@ function getActiveLocaleFontMap() {
     for (const rule of settings.localeFonts) {
         const key = String(rule?.rangeKey || '').trim();
         if (!key || !UNICODE_RANGES[key]) continue;
+        const families = parseFontFamilyList(rule?.font);
+        const primary = families[0] || '';
+        if (primary && invalidConfiguredFontFamilies.has(primary)) continue;
+
         const fontCss = toCssFontFamilyValue(rule?.font);
         if (!fontCss) continue;
         map.set(key, fontCss);

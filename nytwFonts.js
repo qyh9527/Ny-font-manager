@@ -1,13 +1,16 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { settings } from './nytwState.js';
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { settings } from './nytwState.js';
 import { LOCALE_UI_ORDER, UNICODE_RANGES } from './nytwLocaleData.js';
 
 const FONT_STYLE_ID = 'nytw-font-style';
 const EXTERNAL_FONT_LINK_ATTR = 'data-nytw-font-css';
+const EXTERNAL_FONT_LINK_STATUS_ATTR = 'data-nytw-font-css-status';
 const FONT_DB_NAME = 'nytw-fonts';
 const FONT_DB_VERSION = 1;
 const FONT_STORE_NAME = 'fonts';
 const FONT_API_LOAD_TIMEOUT_MS = 5000;
-const FONT_API_BYPASS_SIZE_BYTES = 8 * 1024 * 1024;
+const EXTERNAL_CSS_LOAD_TIMEOUT_MS = 10000;
+const FONT_FAMILY_CHECK_TIMEOUT_MS = 4000;
+const FONT_MEASURE_SAMPLE_TEXTS = ['NyTW_Font_Check_12345', '汉字測試', 'かなカナ', '한글테스트'];
 
 let fontDbPromise = null;
 function openFontDb() {
@@ -383,14 +386,83 @@ function extractFontFamiliesFromCssText(cssText) {
 }
 
 function collectExternalFontCssUrlsForFamilies(families) {
-    // Load all imported CSS fonts to ensure they are available for preview
+    const requiredFamilies = new Set(
+        (families || [])
+            .map((name) => normalizeFamilyKey(name))
+            .filter(Boolean),
+    );
+
     const urls = new Set();
     for (const font of settings.importedFonts) {
         if (getImportedFontKind(font) !== 'css') continue;
+        const familyKey = normalizeFamilyKey(font?.family);
+        if (!familyKey || !requiredFamilies.has(familyKey)) continue;
         const href = normalizeExternalStylesheetUrl(font?.cssUrl);
         if (href) urls.add(href);
     }
     return urls;
+}
+
+const externalStylesheetPromises = new Map(); // href -> Promise<{ ok, reason }>
+
+function ensureExternalStylesheetLoadPromise(link, href) {
+    if (!(link instanceof HTMLLinkElement) || !href) {
+        return Promise.resolve({ ok: false, reason: '无效的样式链接节点。' });
+    }
+
+    const cached = externalStylesheetPromises.get(href);
+    if (cached) return cached;
+
+    if (link.getAttribute(EXTERNAL_FONT_LINK_STATUS_ATTR) === 'loaded') {
+        return Promise.resolve({ ok: true, reason: '' });
+    }
+
+    // Existing links injected before this version may not have status attr.
+    // If the stylesheet is already attached, treat it as loaded.
+    try {
+        if (link.sheet) {
+            link.setAttribute(EXTERNAL_FONT_LINK_STATUS_ATTR, 'loaded');
+            return Promise.resolve({ ok: true, reason: '' });
+        }
+    } catch { /* ignore cross-origin/style access edge cases */ }
+
+    if (link.getAttribute(EXTERNAL_FONT_LINK_STATUS_ATTR) === 'error') {
+        return Promise.resolve({ ok: false, reason: '字体 CSS 链接加载失败（网络或跨域策略限制）。' });
+    }
+
+    const promise = new Promise((resolve) => {
+        let settled = false;
+        /** @type {ReturnType<typeof setTimeout>|null} */
+        let timer = null;
+
+        const cleanup = () => {
+            link.removeEventListener('load', onLoad);
+            link.removeEventListener('error', onError);
+            if (timer) clearTimeout(timer);
+            externalStylesheetPromises.delete(href);
+        };
+
+        const done = (ok, reason) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            link.setAttribute(EXTERNAL_FONT_LINK_STATUS_ATTR, ok ? 'loaded' : 'error');
+            resolve({ ok, reason: String(reason || '') });
+        };
+
+        const onLoad = () => done(true, '');
+        const onError = () => done(false, '字体 CSS 链接加载失败（网络或跨域策略限制）。');
+
+        link.addEventListener('load', onLoad, { once: true });
+        link.addEventListener('error', onError, { once: true });
+
+        timer = setTimeout(() => {
+            done(false, `字体 CSS 链接加载超时（${EXTERNAL_CSS_LOAD_TIMEOUT_MS}ms）。`);
+        }, EXTERNAL_CSS_LOAD_TIMEOUT_MS);
+    });
+
+    externalStylesheetPromises.set(href, promise);
+    return promise;
 }
 
 function syncExternalFontStylesheets(requiredUrls) {
@@ -416,23 +488,70 @@ function syncExternalFontStylesheets(requiredUrls) {
             continue;
         }
 
+        if (!link.getAttribute(EXTERNAL_FONT_LINK_STATUS_ATTR)) {
+            try {
+                link.setAttribute(EXTERNAL_FONT_LINK_STATUS_ATTR, link.sheet ? 'loaded' : 'loading');
+            } catch {
+                link.setAttribute(EXTERNAL_FONT_LINK_STATUS_ATTR, 'loading');
+            }
+        }
+
         existingByHref.set(href, link);
     }
 
     for (const [href, link] of existingByHref.entries()) {
-        if (!required.has(href)) link.remove();
+        if (!required.has(href)) {
+            link.remove();
+            externalStylesheetPromises.delete(href);
+        }
     }
 
     for (const href of required) {
-        if (existingByHref.has(href)) continue;
+        if (existingByHref.has(href)) {
+            continue;
+        }
         const link = document.createElement('link');
         link.rel = 'stylesheet';
         link.href = href;
         link.setAttribute(EXTERNAL_FONT_LINK_ATTR, '1');
+        link.setAttribute(EXTERNAL_FONT_LINK_STATUS_ATTR, 'loading');
         link.crossOrigin = 'anonymous';
         link.referrerPolicy = 'no-referrer';
         document.head.appendChild(link);
     }
+}
+
+async function ensureExternalFontStylesheetsReady(requiredUrls) {
+    const normalizedRequired = new Set();
+    for (const url of requiredUrls || []) {
+        const href = normalizeExternalStylesheetUrl(url);
+        if (href) normalizedRequired.add(href);
+    }
+    if (!normalizedRequired.size) return new Map();
+
+    /** @type {Map<string, { ok: boolean, reason: string }>} */
+    const results = new Map();
+    const links = Array.from(document.querySelectorAll(`link[${EXTERNAL_FONT_LINK_ATTR}]`))
+        .filter((el) => el instanceof HTMLLinkElement);
+
+    const byHref = new Map();
+    for (const link of links) {
+        const href = normalizeExternalStylesheetUrl(link.getAttribute('href') || link.href);
+        if (!href || !normalizedRequired.has(href) || byHref.has(href)) continue;
+        byHref.set(href, link);
+    }
+
+    for (const href of normalizedRequired) {
+        const link = byHref.get(href);
+        if (!(link instanceof HTMLLinkElement)) {
+            results.set(href, { ok: false, reason: '字体 CSS 链接未注入到页面。' });
+            continue;
+        }
+        const result = await ensureExternalStylesheetLoadPromise(link, href);
+        results.set(href, result);
+    }
+
+    return results;
 }
 
 function ensureFontStyleElement() {
@@ -444,9 +563,180 @@ function ensureFontStyleElement() {
     return el;
 }
 
-const fontObjectUrls = new Map(); // id -> blob URL
 const fontApiFaces = new Map(); // id -> { family, face }
-const fontApiFailedIds = new Set(); // ids that failed FontFace API and should use CSS fallback
+const importedFontIssues = new Map(); // id -> reason
+
+function normalizeFamilyKey(value) {
+    return String(value || '')
+        .trim()
+        .replace(/^["']|["']$/g, '')
+        .replace(/\s+/g, ' ')
+        .toLowerCase();
+}
+
+function normalizeFamilyFuzzyKey(value) {
+    return normalizeFamilyKey(value)
+        .replace(/[\s"'`‘’“”.,_+\-\/\\()[\]{}:;!?]/g, '');
+}
+
+function getAutoMatchFamilyCandidates() {
+    const values = new Set();
+    const add = (value) => {
+        const raw = String(value || '').trim().replace(/^["']|["']$/g, '');
+        if (!raw) return;
+        values.add(raw);
+    };
+
+    for (const family of buildSuggestedFontFamilies()) {
+        add(family);
+    }
+
+    for (const font of settings.importedFonts || []) {
+        add(font?.family);
+    }
+
+    for (const item of fontApiFaces.values()) {
+        add(item?.family);
+    }
+
+    if (document?.fonts && typeof document.fonts.values === 'function') {
+        try {
+            for (const face of document.fonts.values()) {
+                add(face?.family);
+            }
+        } catch { /* ignore */ }
+    }
+
+    return Array.from(values);
+}
+
+function getFamilyAliasScore(inputFamily, candidateFamily) {
+    const inputKey = normalizeFamilyKey(inputFamily);
+    const candidateKey = normalizeFamilyKey(candidateFamily);
+    if (!inputKey || !candidateKey) return 0;
+    if (inputKey === candidateKey) return 100;
+
+    const inputFuzzy = normalizeFamilyFuzzyKey(inputKey);
+    const candidateFuzzy = normalizeFamilyFuzzyKey(candidateKey);
+    if (inputFuzzy && inputFuzzy === candidateFuzzy) return 95;
+
+    if (inputKey.length >= 4 && (candidateKey.includes(inputKey) || inputKey.includes(candidateKey))) {
+        return 86;
+    }
+
+    if (inputFuzzy.length >= 4 && (candidateFuzzy.includes(inputFuzzy) || inputFuzzy.includes(candidateFuzzy))) {
+        return 84;
+    }
+
+    const inputWords = inputKey.split(/\s+/).filter(Boolean);
+    const candidateWords = new Set(candidateKey.split(/\s+/).filter(Boolean));
+    const overlap = inputWords.filter((word) => candidateWords.has(word)).length;
+    if (overlap >= 2) return 80;
+
+    return 0;
+}
+
+async function guessUsableFamilyByAlias(inputFamily) {
+    const raw = String(inputFamily || '').trim();
+    if (!raw) {
+        return { ok: false, family: '', reason: '字体名称为空。' };
+    }
+
+    const inputKey = normalizeFamilyKey(raw);
+    const ranked = getAutoMatchFamilyCandidates()
+        .map((family) => ({ family, score: getFamilyAliasScore(raw, family) }))
+        .filter((item) => item.score >= 80)
+        .filter((item) => normalizeFamilyKey(item.family) !== inputKey)
+        .sort((a, b) => b.score - a.score || a.family.length - b.family.length)
+        .slice(0, 12);
+
+    for (const item of ranked) {
+        const availability = await ensureFontFamilyUsable(item.family);
+        if (availability.ok) {
+            return { ok: true, family: item.family, reason: '' };
+        }
+    }
+
+    return { ok: false, family: '', reason: '未找到可自动匹配的真实字体 family 名。' };
+}
+
+function findImportedFontByFamily(family) {
+    const key = normalizeFamilyKey(family);
+    if (!key) return null;
+    return settings.importedFonts.find((font) => normalizeFamilyKey(font?.family) === key) || null;
+}
+
+function setImportedFontIssue(fontId, reason) {
+    if (!fontId) return;
+    const text = String(reason || '').trim();
+    if (!text) {
+        importedFontIssues.delete(fontId);
+        return;
+    }
+    importedFontIssues.set(fontId, text);
+}
+
+let measureCtx = null;
+function getMeasureCtx() {
+    if (measureCtx) return measureCtx;
+    try {
+        const canvas = document.createElement('canvas');
+        measureCtx = canvas.getContext('2d');
+    } catch {
+        measureCtx = null;
+    }
+    return measureCtx;
+}
+
+function measureTextWidth(text, fontFamily) {
+    const ctx = getMeasureCtx();
+    if (!ctx) return NaN;
+    ctx.font = `72px ${fontFamily}`;
+    return ctx.measureText(String(text || '')).width;
+}
+
+function isFamilyDifferentFromFallbacks(family) {
+    const token = formatCssFontFamilyToken(family);
+    if (!token) return false;
+
+    // Generic families are always available by definition.
+    if (GENERIC_FONT_FAMILIES.has(String(family || '').trim().toLowerCase())) {
+        return true;
+    }
+
+    const fallbackBases = ['monospace', 'serif', 'sans-serif'];
+    for (const sample of FONT_MEASURE_SAMPLE_TEXTS) {
+        for (const base of fallbackBases) {
+            const baseWidth = measureTextWidth(sample, base);
+            const candidateWidth = measureTextWidth(sample, `${token}, ${base}`);
+            if (!Number.isFinite(baseWidth) || !Number.isFinite(candidateWidth)) continue;
+            if (Math.abs(candidateWidth - baseWidth) > 0.02) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+function hasLoadedFaceInDocumentFonts(family) {
+    if (!document?.fonts) return false;
+    const target = normalizeFamilyKey(String(family || '').replace(/^["']|["']$/g, ''));
+    if (!target) return false;
+
+    try {
+        for (const face of document.fonts.values()) {
+            const faceFamily = normalizeFamilyKey(String(face?.family || '').replace(/^["']|["']$/g, ''));
+            if (faceFamily === target && String(face?.status || '') === 'loaded') {
+                return true;
+            }
+        }
+    } catch {
+        return false;
+    }
+
+    return false;
+}
 
 function removeFontApiFace(fontId) {
     const existing = fontApiFaces.get(fontId);
@@ -461,16 +751,65 @@ function removeFontApiFace(fontId) {
     fontApiFaces.delete(fontId);
 }
 
+async function waitForFontFamilyReady(family) {
+    const token = formatCssFontFamilyToken(family);
+    if (!token) return { ok: false, reason: '字体名称无效。' };
+    if (!document?.fonts || typeof document.fonts.load !== 'function') {
+        return { ok: false, reason: '浏览器不支持 document.fonts API，无法验证字体是否加载。' };
+    }
+
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    let loadTimeout = null;
+    try {
+        await Promise.race([
+            document.fonts.load(`16px ${token}`, 'NyTW字aあ한'),
+            new Promise((_, reject) => {
+                loadTimeout = setTimeout(() => {
+                    reject(new Error(`字体可用性检测超时（${FONT_FAMILY_CHECK_TIMEOUT_MS}ms）`));
+                }, FONT_FAMILY_CHECK_TIMEOUT_MS);
+            }),
+        ]);
+    } catch (error) {
+        return { ok: false, reason: `字体资源加载失败：${error?.message || error}` };
+    } finally {
+        if (loadTimeout) clearTimeout(loadTimeout);
+    }
+
+    if (typeof document.fonts.check === 'function') {
+        const checkOk = document.fonts.check(`16px ${token}`, 'NyTW字aあ한');
+        if (!checkOk) {
+            return { ok: false, reason: '浏览器字体检查失败，字体未真正生效。' };
+        }
+    }
+
+    const metricOk = isFamilyDifferentFromFallbacks(family);
+    const loadedFaceOk = hasLoadedFaceInDocumentFonts(family);
+    if (!metricOk && !loadedFaceOk) {
+        return { ok: false, reason: '检测到浏览器仍在使用回退字体（目标字体未生效）。' };
+    }
+
+    return { ok: true, reason: '' };
+}
+
 async function ensureFontLoadedViaApi(meta, blob) {
-    if (!meta?.id || !meta?.family || !blob) return false;
-    if (typeof FontFace !== 'function') return false;
-    if (!document?.fonts || typeof document.fonts.add !== 'function') return false;
+    if (!meta?.id || !meta?.family || !blob) {
+        return { ok: false, reason: '字体元数据不完整。' };
+    }
+    if (typeof FontFace !== 'function') {
+        return { ok: false, reason: '浏览器不支持 FontFace API，无法加载本地字体。' };
+    }
+    if (!document?.fonts || typeof document.fonts.add !== 'function') {
+        return { ok: false, reason: '浏览器不支持 document.fonts.add，无法注册本地字体。' };
+    }
 
     const family = String(meta.family || '').trim();
-    if (!family) return false;
+    if (!family) return { ok: false, reason: '字体名称为空。' };
 
     const existing = fontApiFaces.get(meta.id);
-    if (existing?.family === family) return true;
+    if (existing?.family === family) {
+        const ready = await waitForFontFamilyReady(family);
+        if (ready.ok) return ready;
+    }
     if (existing) removeFontApiFace(meta.id);
 
     /** @type {ReturnType<typeof setTimeout>|null} */
@@ -480,21 +819,30 @@ async function ensureFontLoadedViaApi(meta, blob) {
         const buffer = typeof blob.arrayBuffer === 'function'
             ? await blob.arrayBuffer()
             : await new Response(blob).arrayBuffer();
+        if (!buffer?.byteLength) {
+            return { ok: false, reason: '字体文件为空或读取失败。' };
+        }
+
         const face = new FontFace(family, buffer, { display: 'swap' });
         await Promise.race([
             face.load(),
             new Promise((_, reject) => {
                 loadTimeout = setTimeout(() => {
-                    reject(new Error(`FontFace load timeout (${FONT_API_LOAD_TIMEOUT_MS}ms)`));
+                    reject(new Error(`FontFace 加载超时（${FONT_API_LOAD_TIMEOUT_MS}ms）`));
                 }, FONT_API_LOAD_TIMEOUT_MS);
             }),
         ]);
+
         document.fonts.add(face);
         fontApiFaces.set(meta.id, { family, face });
-        return true;
+        const ready = await waitForFontFamilyReady(family);
+        if (!ready.ok) {
+            removeFontApiFace(meta.id);
+            return ready;
+        }
+        return ready;
     } catch (error) {
-        console.warn('[NyTW] Failed to load local font via FontFace API', meta?.fileName || meta?.id, error);
-        return false;
+        return { ok: false, reason: `本地字体加载失败：${error?.message || error}` };
     } finally {
         if (loadTimeout) {
             clearTimeout(loadTimeout);
@@ -502,18 +850,8 @@ async function ensureFontLoadedViaApi(meta, blob) {
     }
 }
 
-function shouldBypassFontApiBySize(meta) {
-    const size = Number(meta?.size);
-    if (!Number.isFinite(size) || size <= 0) return false;
-    return size > FONT_API_BYPASS_SIZE_BYTES;
-}
-
 function revokeAllFontObjectUrls() {
-    for (const url of fontObjectUrls.values()) {
-        try { URL.revokeObjectURL(url); } catch { /* no-op */ }
-    }
-    fontObjectUrls.clear();
-    fontApiFailedIds.clear();
+    importedFontIssues.clear();
 
     for (const id of Array.from(fontApiFaces.keys())) {
         removeFontApiFace(id);
@@ -521,114 +859,113 @@ function revokeAllFontObjectUrls() {
 }
 
 async function buildFontFaceCssForFamilies(families) {
-    // Load imported file fonts on-demand (only families currently referenced by active settings).
     const requiredFamilies = new Set(
         (families || [])
             .map((name) => String(name || '').trim())
             .filter(Boolean),
     );
 
-    const metas = settings.importedFonts.filter((f) => {
-        if (getImportedFontKind(f) !== 'file') return false;
-        const family = String(f?.family || '').trim();
+    const metas = settings.importedFonts.filter((font) => {
+        if (getImportedFontKind(font) !== 'file') return false;
+        const family = String(font?.family || '').trim();
         if (!family) return false;
         return requiredFamilies.size > 0 && requiredFamilies.has(family);
     });
 
-    const requiredIds = new Set(metas.map(f => f.id));
-    for (const [id, url] of fontObjectUrls.entries()) {
-        if (!requiredIds.has(id)) {
-            try { URL.revokeObjectURL(url); } catch { /* no-op */ }
-            fontObjectUrls.delete(id);
+    const requiredIds = new Set(metas.map((font) => font.id));
+
+    const existingImportedIds = new Set(settings.importedFonts.map((font) => font?.id).filter(Boolean));
+    for (const id of Array.from(importedFontIssues.keys())) {
+        if (!existingImportedIds.has(id)) {
+            importedFontIssues.delete(id);
         }
     }
+
     for (const id of Array.from(fontApiFaces.keys())) {
         if (!requiredIds.has(id)) {
             removeFontApiFace(id);
         }
     }
-    for (const id of Array.from(fontApiFailedIds)) {
-        if (!requiredIds.has(id)) {
-            fontApiFailedIds.delete(id);
-        }
-    }
 
-    const rules = [];
     for (const meta of metas) {
         if (!meta?.id || !meta?.family) continue;
 
-        const cachedApiFace = fontApiFaces.get(meta.id);
-        const expectedFamily = String(meta.family || '').trim();
-        if (cachedApiFace && cachedApiFace.family !== expectedFamily) {
-            removeFontApiFace(meta.id);
-        }
-
-        const bypassFontApi = shouldBypassFontApiBySize(meta);
-        if (bypassFontApi && fontApiFaces.has(meta.id)) {
-            removeFontApiFace(meta.id);
-        }
-
-        if (!bypassFontApi && fontApiFaces.has(meta.id)) {
-            fontApiFailedIds.delete(meta.id);
-            // Already loaded via FontFace API.
+        const blob = await getFontBlob(meta.id);
+        if (!blob) {
+            setImportedFontIssue(meta.id, '字体文件未找到，可能已被浏览器清理。请重新导入。');
             continue;
         }
-        if (bypassFontApi) {
-            fontApiFailedIds.add(meta.id);
+
+        const result = await ensureFontLoadedViaApi(meta, blob);
+        if (!result.ok) {
+            setImportedFontIssue(meta.id, result.reason || '未知错误');
+            console.warn('[NyTW] Imported file font is not usable', meta.fileName || meta.id, result.reason);
+            continue;
         }
 
-        let blob = null;
-        const shouldTryApi = !bypassFontApi && !fontApiFailedIds.has(meta.id);
-        if (shouldTryApi) {
-            blob = await getFontBlob(meta.id);
-            if (!blob) {
-                console.warn('[NyTW] Missing local font blob for imported font', meta?.fileName || meta?.id);
-                const staleUrl = fontObjectUrls.get(meta.id);
-                if (staleUrl) {
-                    try { URL.revokeObjectURL(staleUrl); } catch { /* no-op */ }
-                    fontObjectUrls.delete(meta.id);
-                }
-                continue;
-            }
-
-            const loadedViaApi = await ensureFontLoadedViaApi(meta, blob);
-            if (loadedViaApi) {
-                fontApiFailedIds.delete(meta.id);
-                const staleUrl = fontObjectUrls.get(meta.id);
-                if (staleUrl) {
-                    try { URL.revokeObjectURL(staleUrl); } catch { /* no-op */ }
-                    fontObjectUrls.delete(meta.id);
-                }
-                continue;
-            }
-            fontApiFailedIds.add(meta.id);
-        }
-
-        let url = fontObjectUrls.get(meta.id);
-        if (!url) {
-            if (!blob) {
-                blob = await getFontBlob(meta.id);
-            }
-            if (!blob) continue;
-            url = URL.createObjectURL(blob);
-            fontObjectUrls.set(meta.id, url);
-        }
-
-        const urlToken = `url(${cssQuote(url)})`;
-        const resolvedFormat = meta.format || inferFontFormatFromFileName(meta.fileName);
-        // Keep an unhinted fallback src for maximum compatibility (some font files/extensions mismatch).
-        const hintedSrc = resolvedFormat ? `${urlToken} format(${cssQuote(resolvedFormat)})` : '';
-        const srcValue = hintedSrc ? `${hintedSrc}, ${urlToken}` : urlToken;
-        rules.push([
-            '@font-face{',
-            `font-family:${cssQuote(meta.family)};`,
-            `src:${srcValue};`,
-            'font-display:swap;',
-            '}',
-        ].join(''));
+        setImportedFontIssue(meta.id, '');
     }
 
-    return rules.join('\n');
+    // 本地文件字体仅通过 FontFace API 注入，不再输出 @font-face CSS 兜底。
+    return '';
+}
+
+async function ensureFontFamilyUsable(family) {
+    const normalized = String(family || '').trim();
+    if (!normalized) return { ok: false, reason: '字体名称为空。' };
+
+    const lower = normalized.toLowerCase();
+    if (GENERIC_FONT_FAMILIES.has(lower)) return { ok: true, reason: '' };
+
+    const imported = findImportedFontByFamily(normalized);
+    if (imported && getImportedFontKind(imported) === 'file') {
+        const blob = await getFontBlob(imported.id);
+        if (!blob) {
+            const reason = '字体文件未找到，可能已被浏览器清理。请重新导入。';
+            setImportedFontIssue(imported.id, reason);
+            return { ok: false, reason };
+        }
+
+        const loaded = await ensureFontLoadedViaApi(imported, blob);
+        if (!loaded.ok) {
+            setImportedFontIssue(imported.id, loaded.reason || '未知错误');
+            return loaded;
+        }
+        setImportedFontIssue(imported.id, '');
+        return loaded;
+    }
+
+    if (imported && getImportedFontKind(imported) === 'css') {
+        const href = normalizeExternalStylesheetUrl(imported.cssUrl);
+        if (!href) {
+            const reason = '字体 CSS 链接无效。';
+            setImportedFontIssue(imported.id, reason);
+            return { ok: false, reason };
+        }
+        syncExternalFontStylesheets([href]);
+        const readiness = await ensureExternalFontStylesheetsReady([href]);
+        const linkState = readiness.get(href);
+        if (!linkState?.ok) {
+            const reason = linkState?.reason || '字体 CSS 链接加载失败。';
+            setImportedFontIssue(imported.id, reason);
+            return { ok: false, reason };
+        }
+    }
+
+    const ready = await waitForFontFamilyReady(normalized);
+    if (imported?.id) {
+        setImportedFontIssue(imported.id, ready.ok ? '' : ready.reason);
+    }
+    if (!ready.ok && !imported) {
+        return { ok: false, reason: `字体不可用：${ready.reason || '系统未安装该字体。'}` };
+    }
+    return ready;
+}
+
+function getFontIssueReasonForFamily(family) {
+    const imported = findImportedFontByFamily(family);
+    if (!imported?.id) return '';
+    return importedFontIssues.get(imported.id) || '';
 }
 
 function buildSuggestedFontFamilies() {
@@ -898,9 +1235,13 @@ export {
     extractFontFamiliesFromCssText,
     collectExternalFontCssUrlsForFamilies,
     syncExternalFontStylesheets,
+    ensureExternalFontStylesheetsReady,
     ensureFontStyleElement,
     revokeAllFontObjectUrls,
     buildFontFaceCssForFamilies,
+    ensureFontFamilyUsable,
+    guessUsableFamilyByAlias,
+    getFontIssueReasonForFamily,
     setupFontPicker,
     setupLocalePicker,
     openFontDb,
