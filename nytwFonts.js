@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿import { settings } from './nytwState.js';
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { settings } from './nytwState.js';
 import { LOCALE_UI_ORDER, UNICODE_RANGES } from './nytwLocaleData.js';
 
 const FONT_STYLE_ID = 'nytw-font-style';
@@ -6,6 +6,8 @@ const EXTERNAL_FONT_LINK_ATTR = 'data-nytw-font-css';
 const FONT_DB_NAME = 'nytw-fonts';
 const FONT_DB_VERSION = 1;
 const FONT_STORE_NAME = 'fonts';
+const FONT_API_LOAD_TIMEOUT_MS = 5000;
+const FONT_API_BYPASS_SIZE_BYTES = 8 * 1024 * 1024;
 
 let fontDbPromise = null;
 function openFontDb() {
@@ -109,6 +111,9 @@ function inferFontFormatFromFileName(fileName) {
     if (name.endsWith('.woff2')) return 'woff2';
     if (name.endsWith('.woff')) return 'woff';
     if (name.endsWith('.otf')) return 'opentype';
+    if (name.endsWith('.otc')) return 'opentype';
+    if (name.endsWith('.ttc')) return 'truetype-collection';
+    if (name.endsWith('.tff')) return 'truetype'; // tolerate common typo extension
     if (name.endsWith('.ttf')) return 'truetype';
     return '';
 }
@@ -234,6 +239,19 @@ const FONT_GROUP_LABELS = {
 };
 
 const FONT_GROUP_ORDER = ['generic', 'chinese', 'english', 'imported'];
+const GENERIC_FONT_FAMILIES = new Set([
+    'serif',
+    'sans-serif',
+    'monospace',
+    'cursive',
+    'fantasy',
+    'system-ui',
+    'ui-serif',
+    'ui-sans-serif',
+    'ui-monospace',
+    'emoji',
+    'math',
+]);
 
 function getFontFamilyDisplayLabel(family) {
     const raw = String(family || '').trim();
@@ -253,21 +271,45 @@ function unwrapFontFamilyLabel(token) {
     const stripped = String(token || '').trim().replace(/^["']|["']$/g, '');
     if (!stripped) return '';
 
-    const match = stripped.match(/^(.+?)[（(]([^（）()]+)[）)]$/);
-    if (match) {
-        const left = match[1] || '';
-        const right = match[2] || '';
-        if (/[\u3400-\u9FFF]/.test(left)) {
-            const candidate = right.trim();
-            if (candidate) return candidate;
-        }
+    // Only unwrap known UI labels generated as: <displayLabel>（<rawFamily>）
+    const match = stripped.match(/^(.+)（([^（）]+)）$/);
+    if (!match) return stripped;
+
+    const displayLabel = String(match[1] || '').trim();
+    const candidate = String(match[2] || '').trim();
+    if (!candidate) return stripped;
+
+    const expectedDisplay = FONT_FAMILY_DISPLAY_NAME_MAP.get(candidate)
+        || FONT_FAMILY_DISPLAY_NAME_MAP.get(candidate.toLowerCase());
+
+    if (expectedDisplay && displayLabel === expectedDisplay) {
+        return candidate;
     }
 
     return stripped;
 }
 
+function formatCssFontFamilyToken(token) {
+    const family = String(token || '').trim();
+    if (!family) return '';
+
+    const lower = family.toLowerCase();
+    if (GENERIC_FONT_FAMILIES.has(lower)) return lower;
+
+    // Safe unquoted identifier list (e.g. "Times New Roman", "Microsoft YaHei")
+    if (/^-?[A-Za-z_][A-Za-z0-9_-]*(?:\s+[A-Za-z0-9_-]+)*$/.test(family)) {
+        return family;
+    }
+
+    // Quote complex names (e.g. CJK names, names with punctuation like "(1)", dots, etc.)
+    return cssQuote(family);
+}
+
 function toCssFontFamilyValue(value) {
-    return parseFontFamilyList(value).join(', ');
+    return parseFontFamilyList(value)
+        .map(formatCssFontFamilyToken)
+        .filter(Boolean)
+        .join(', ');
 }
 
 function getImportedFontKind(font) {
@@ -403,17 +445,95 @@ function ensureFontStyleElement() {
 }
 
 const fontObjectUrls = new Map(); // id -> blob URL
+const fontApiFaces = new Map(); // id -> { family, face }
+const fontApiFailedIds = new Set(); // ids that failed FontFace API and should use CSS fallback
+
+function removeFontApiFace(fontId) {
+    const existing = fontApiFaces.get(fontId);
+    if (!existing) return;
+
+    try {
+        if (document?.fonts && typeof document.fonts.delete === 'function') {
+            document.fonts.delete(existing.face);
+        }
+    } catch { /* no-op */ }
+
+    fontApiFaces.delete(fontId);
+}
+
+async function ensureFontLoadedViaApi(meta, blob) {
+    if (!meta?.id || !meta?.family || !blob) return false;
+    if (typeof FontFace !== 'function') return false;
+    if (!document?.fonts || typeof document.fonts.add !== 'function') return false;
+
+    const family = String(meta.family || '').trim();
+    if (!family) return false;
+
+    const existing = fontApiFaces.get(meta.id);
+    if (existing?.family === family) return true;
+    if (existing) removeFontApiFace(meta.id);
+
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    let loadTimeout = null;
+
+    try {
+        const buffer = typeof blob.arrayBuffer === 'function'
+            ? await blob.arrayBuffer()
+            : await new Response(blob).arrayBuffer();
+        const face = new FontFace(family, buffer, { display: 'swap' });
+        await Promise.race([
+            face.load(),
+            new Promise((_, reject) => {
+                loadTimeout = setTimeout(() => {
+                    reject(new Error(`FontFace load timeout (${FONT_API_LOAD_TIMEOUT_MS}ms)`));
+                }, FONT_API_LOAD_TIMEOUT_MS);
+            }),
+        ]);
+        document.fonts.add(face);
+        fontApiFaces.set(meta.id, { family, face });
+        return true;
+    } catch (error) {
+        console.warn('[NyTW] Failed to load local font via FontFace API', meta?.fileName || meta?.id, error);
+        return false;
+    } finally {
+        if (loadTimeout) {
+            clearTimeout(loadTimeout);
+        }
+    }
+}
+
+function shouldBypassFontApiBySize(meta) {
+    const size = Number(meta?.size);
+    if (!Number.isFinite(size) || size <= 0) return false;
+    return size > FONT_API_BYPASS_SIZE_BYTES;
+}
 
 function revokeAllFontObjectUrls() {
     for (const url of fontObjectUrls.values()) {
         try { URL.revokeObjectURL(url); } catch { /* no-op */ }
     }
     fontObjectUrls.clear();
+    fontApiFailedIds.clear();
+
+    for (const id of Array.from(fontApiFaces.keys())) {
+        removeFontApiFace(id);
+    }
 }
 
 async function buildFontFaceCssForFamilies(families) {
-    // Generate @font-face for all imported file fonts to ensure they are available for preview
-    const metas = settings.importedFonts.filter(f => getImportedFontKind(f) === 'file');
+    // Load imported file fonts on-demand (only families currently referenced by active settings).
+    const requiredFamilies = new Set(
+        (families || [])
+            .map((name) => String(name || '').trim())
+            .filter(Boolean),
+    );
+
+    const metas = settings.importedFonts.filter((f) => {
+        if (getImportedFontKind(f) !== 'file') return false;
+        const family = String(f?.family || '').trim();
+        if (!family) return false;
+        return requiredFamilies.size > 0 && requiredFamilies.has(family);
+    });
 
     const requiredIds = new Set(metas.map(f => f.id));
     for (const [id, url] of fontObjectUrls.entries()) {
@@ -422,24 +542,87 @@ async function buildFontFaceCssForFamilies(families) {
             fontObjectUrls.delete(id);
         }
     }
+    for (const id of Array.from(fontApiFaces.keys())) {
+        if (!requiredIds.has(id)) {
+            removeFontApiFace(id);
+        }
+    }
+    for (const id of Array.from(fontApiFailedIds)) {
+        if (!requiredIds.has(id)) {
+            fontApiFailedIds.delete(id);
+        }
+    }
 
     const rules = [];
     for (const meta of metas) {
         if (!meta?.id || !meta?.family) continue;
 
+        const cachedApiFace = fontApiFaces.get(meta.id);
+        const expectedFamily = String(meta.family || '').trim();
+        if (cachedApiFace && cachedApiFace.family !== expectedFamily) {
+            removeFontApiFace(meta.id);
+        }
+
+        const bypassFontApi = shouldBypassFontApiBySize(meta);
+        if (bypassFontApi && fontApiFaces.has(meta.id)) {
+            removeFontApiFace(meta.id);
+        }
+
+        if (!bypassFontApi && fontApiFaces.has(meta.id)) {
+            fontApiFailedIds.delete(meta.id);
+            // Already loaded via FontFace API.
+            continue;
+        }
+        if (bypassFontApi) {
+            fontApiFailedIds.add(meta.id);
+        }
+
+        let blob = null;
+        const shouldTryApi = !bypassFontApi && !fontApiFailedIds.has(meta.id);
+        if (shouldTryApi) {
+            blob = await getFontBlob(meta.id);
+            if (!blob) {
+                console.warn('[NyTW] Missing local font blob for imported font', meta?.fileName || meta?.id);
+                const staleUrl = fontObjectUrls.get(meta.id);
+                if (staleUrl) {
+                    try { URL.revokeObjectURL(staleUrl); } catch { /* no-op */ }
+                    fontObjectUrls.delete(meta.id);
+                }
+                continue;
+            }
+
+            const loadedViaApi = await ensureFontLoadedViaApi(meta, blob);
+            if (loadedViaApi) {
+                fontApiFailedIds.delete(meta.id);
+                const staleUrl = fontObjectUrls.get(meta.id);
+                if (staleUrl) {
+                    try { URL.revokeObjectURL(staleUrl); } catch { /* no-op */ }
+                    fontObjectUrls.delete(meta.id);
+                }
+                continue;
+            }
+            fontApiFailedIds.add(meta.id);
+        }
+
         let url = fontObjectUrls.get(meta.id);
         if (!url) {
-            const blob = await getFontBlob(meta.id);
+            if (!blob) {
+                blob = await getFontBlob(meta.id);
+            }
             if (!blob) continue;
             url = URL.createObjectURL(blob);
             fontObjectUrls.set(meta.id, url);
         }
 
-        const format = meta.format ? ` format(${cssQuote(meta.format)})` : '';
+        const urlToken = `url(${cssQuote(url)})`;
+        const resolvedFormat = meta.format || inferFontFormatFromFileName(meta.fileName);
+        // Keep an unhinted fallback src for maximum compatibility (some font files/extensions mismatch).
+        const hintedSrc = resolvedFormat ? `${urlToken} format(${cssQuote(resolvedFormat)})` : '';
+        const srcValue = hintedSrc ? `${hintedSrc}, ${urlToken}` : urlToken;
         rules.push([
             '@font-face{',
             `font-family:${cssQuote(meta.family)};`,
-            `src:url(${cssQuote(url)})${format};`,
+            `src:${srcValue};`,
             'font-display:swap;',
             '}',
         ].join(''));

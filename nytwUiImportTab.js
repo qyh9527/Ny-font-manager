@@ -13,6 +13,7 @@ import {
     inferFontFormatFromFileName,
     normalizeExternalStylesheetUrl,
     normalizeFontFamily,
+    parseFontFamilyList,
     putFontBlob,
     toCssFontFamilyValue,
     uniqueFontFamily,
@@ -339,11 +340,17 @@ export function initImportTab() {
         if (target.classList.contains('nytw-font-delete')) {
             settings.importedFonts = settings.importedFonts.filter(f => f.id !== fontId);
             const deletedFamily = String(font.family || '').trim();
+
             if (deletedFamily) {
-                if (toCssFontFamilyValue(settings.globalFont) === deletedFamily) settings.globalFont = '';
-                if (toCssFontFamilyValue(settings.bodyFont) === deletedFamily) settings.bodyFont = '';
-                if (toCssFontFamilyValue(settings.dialogueFont) === deletedFamily) settings.dialogueFont = '';
-                if (toCssFontFamilyValue(settings.customFont) === deletedFamily) settings.customFont = '';
+                const matchesDeletedFamily = (value) => {
+                    const families = parseFontFamilyList(value);
+                    return families.length === 1 && families[0] === deletedFamily;
+                };
+
+                if (matchesDeletedFamily(settings.globalFont)) settings.globalFont = '';
+                if (matchesDeletedFamily(settings.bodyFont)) settings.bodyFont = '';
+                if (matchesDeletedFamily(settings.dialogueFont)) settings.dialogueFont = '';
+                if (matchesDeletedFamily(settings.customFont)) settings.customFont = '';
 
                 const globalInput = document.getElementById('nytw_global_font');
                 if (globalInput instanceof HTMLInputElement) {
