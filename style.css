@@ -362,7 +362,7 @@
     color: #ff6b6b;
 }
 
-.menu_button {
+.nytw-settings-container .menu_button {
     /* 继承全局样式但微调 */
     padding: 4px 12px;
     height: 30px;
