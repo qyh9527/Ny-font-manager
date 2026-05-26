@@ -1,4 +1,4 @@
-import { isWithinNytwProtectedContent } from './nytwProtectedContent.js';
+import { isLikelyNytwMarkdownTableSource, isWithinNytwProtectedContent } from './nytwProtectedContent.js';
 
 export const CUSTOM_INDEPENDENT_FONT_CLASS = 'ny-custom-font';
 
@@ -93,6 +93,7 @@ function collectEligibleTextNodes(rootEl) {
     const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
             if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+            if (isLikelyNytwMarkdownTableSource(node.nodeValue)) return NodeFilter.FILTER_REJECT;
             const parent = node.parentElement;
             if (!parent) return NodeFilter.FILTER_REJECT;
             if (isWithinNytwProtectedContent(parent)) return NodeFilter.FILTER_REJECT;

@@ -1,7 +1,7 @@
 ﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { eventSource, event_types, streamingProcessor } from '../../../../script.js';
 import { applyCustomIndependentFont, CUSTOM_INDEPENDENT_FONT_CLASS, CUSTOM_INDEPENDENT_FONT_MARK_ATTR } from './customIndependentFont.js';
 import { morphdom } from '../../../../lib.js';
-import { isNytwProtectedContentElement, isWithinNytwProtectedContent } from './nytwProtectedContent.js';
+import { isLikelyNytwMarkdownTableSource, isNytwProtectedContentElement, isWithinNytwProtectedContent } from './nytwProtectedContent.js';
 import {
     clampOptionalFontSize,
     clampOptionalLetterSpacing,
@@ -485,6 +485,7 @@ function applyQuoteWrapping(rootEl) {
     const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
             if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+            if (isLikelyNytwMarkdownTableSource(node.nodeValue)) return NodeFilter.FILTER_REJECT;
             const text = node.nodeValue;
             if (!quotePairs.some(([open]) => text.includes(open))) return NodeFilter.FILTER_REJECT;
 
@@ -821,6 +822,7 @@ function collectEligibleLocaleTextNodes(containerEl) {
     const walker = document.createTreeWalker(containerEl, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
             if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+            if (isLikelyNytwMarkdownTableSource(node.nodeValue)) return NodeFilter.FILTER_REJECT;
             const parent = node.parentElement;
             if (!parent) return NodeFilter.FILTER_REJECT;
             if (isWithinNytwProtectedContent(parent)) return NodeFilter.FILTER_REJECT;
@@ -992,6 +994,7 @@ function segmentTextForStreamingAnimation(rootEl, { granularity = 'word', baseIn
             }
 
             if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+            if (isLikelyNytwMarkdownTableSource(node.nodeValue)) return NodeFilter.FILTER_REJECT;
             const parent = node.parentElement;
             if (!parent) return NodeFilter.FILTER_REJECT;
             if (parent.closest(`.${STREAM_SEG_CLASS}`)) return NodeFilter.FILTER_REJECT;
@@ -1071,6 +1074,10 @@ function typewriterizeNode(node, ctx) {
     if (!node) return document.createDocumentFragment();
 
     if (node.nodeType === Node.TEXT_NODE) {
+        if (isLikelyNytwMarkdownTableSource(node.textContent || '')) {
+            return document.createTextNode(node.textContent || '');
+        }
+
         const frag = document.createDocumentFragment();
         const segments = splitGraphemes(node.textContent || '');
         for (const segment of segments) {
@@ -1257,6 +1264,7 @@ function wrapBundleQuotesAndCustom(rootEl) {
         const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, {
             acceptNode(node) {
                 if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+                if (isLikelyNytwMarkdownTableSource(node.nodeValue)) return NodeFilter.FILTER_REJECT;
                 if (!node.nodeValue.includes(customOpen)) return NodeFilter.FILTER_REJECT;
                 const parent = node.parentElement;
                 if (!parent) return NodeFilter.FILTER_REJECT;
